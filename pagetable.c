@@ -5,6 +5,7 @@
 #include <linux/uaccess.h>
 #include <linux/debugfs.h>
 #include <linux/sched/mm.h>
+#include <linux/mm.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Alexander Gryanko");
@@ -98,7 +99,91 @@ static struct file_operations pid_ops = {
     .write = pid_write,
 };
 
-static void dump_pte(struct seq_file *m, u64 idx, u64 mask, void *table) {
+
+// code from fs/proc/task_mmu.c
+// not visible function
+static int is_stack(struct vm_area_struct *vma)
+{
+	/*
+	 * We make no effort to guess what a given thread considers to be
+	 * its "stack".  It's not even well-defined for programs written
+	 * languages like Go.
+	 */
+	return vma->vm_start <= vma->vm_mm->start_stack &&
+		vma->vm_end >= vma->vm_mm->start_stack;
+}
+
+static void dump_vmarea(struct seq_file *m, struct mm_struct *mm_pt, u64 idx) {
+    struct vm_area_struct *vma = find_vma(mm_pt, idx);
+    
+    struct mm_struct *mm = vma->vm_mm;
+	struct file *file = vma->vm_file;
+	unsigned long ino = 0;
+	unsigned long long pgoff = 0;
+	unsigned long start, end;
+	dev_t dev = 0;
+	const char *name = NULL;
+
+    if (vma == NULL) {
+        return;
+    }
+    seq_printf(m, "%s Page vm_area struct info: ", L4_SPACE);
+
+    // code from fs/proc/task_mmu.c with custom formatting
+    if (file) {
+		struct inode *inode = file_inode(vma->vm_file);
+		dev = inode->i_sb->s_dev;
+		ino = inode->i_ino;
+		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
+	}
+
+	start = vma->vm_start;
+	end = vma->vm_end;
+
+	/*
+	 * Print the dentry name for named mappings, and a
+	 * special [heap] marker for the heap:
+	 */
+	if (file) {
+		seq_pad(m, ' ');
+		seq_file_path(m, file, "\n");
+		goto done;
+	}
+
+	if (vma->vm_ops && vma->vm_ops->name) {
+		name = vma->vm_ops->name(vma);
+		if (name)
+			goto done;
+	}
+
+    if (vma->vm_flags & VM_MPX)
+		name = "[mpx]";
+
+	if (!name) {
+		if (!mm) {
+			name = "[vdso]";
+			goto done;
+		}
+
+		if (vma->vm_start <= mm->brk &&
+		    vma->vm_end >= mm->start_brk) {
+			name = "[heap]";
+			goto done;
+		}
+
+		if (is_stack(vma))
+			name = "[stack]";
+	}
+
+done:
+	if (name) {
+		seq_pad(m, ' ');
+		seq_puts(m, name);
+	}
+	seq_putc(m, '\n');
+}
+
+static void dump_pte(struct seq_file *m, struct mm_struct *mm_pt, u64 idx, u64 mask, void *table) {
     /* PTE entry
      * Intel Vol. 3A 4-27
      * Bit Position(s) Contents
@@ -130,6 +215,9 @@ static void dump_pte(struct seq_file *m, u64 idx, u64 mask, void *table) {
     u64 entry = (u64)table;
     u64 phys = 0;
     u64 virt = 0;
+
+    // Shift just for proper address display and vmarea search
+    idx <<= ADDRESS_OFFSET_SHIFT;
 
     if(!(entry & _PAGE_PRESENT)) {
         seq_printf(m, "%s PTE is not present\n", L4_SPACE);
@@ -175,13 +263,13 @@ static void dump_pte(struct seq_file *m, u64 idx, u64 mask, void *table) {
     }
     seq_printf(m, "%s Page kernel virtual address 0x%llx\n", L4_SPACE, virt);
     if (entry & _PAGE_USER) {
-        // Shift just for proper address display
-        seq_printf(m, "%s Page user virtual address 0x%llx\n", L4_SPACE, idx << ADDRESS_OFFSET_SHIFT);
+        seq_printf(m, "%s Page user virtual address 0x%llx\n", L4_SPACE, idx);
+        dump_vmarea(m, mm_pt, idx); 
     }
 
 }
 
-static void dump_pmd(struct seq_file *m, u64 idx, void *table) {
+static void dump_pmd(struct seq_file *m, struct mm_struct *mm_pt, u64 idx, void *table) {
     /* PMD(PDe)
      * Intel 4-26 Vol. 3A
      *
@@ -276,7 +364,7 @@ static void dump_pmd(struct seq_file *m, u64 idx, void *table) {
     if (entry & _PAGE_PSE) {
         // user space address shifted for 21 bit because of direct mapping to PTE
         seq_printf(m, "%s PTE is 2MB HugePage\n", L3_SPACE);
-        dump_pte(m, idx << (ADDRESS_IDX_SHIFT + ADDRESS_OFFSET_SHIFT), HUGE_2M_MASK, table);
+        dump_pte(m, mm_pt, idx << (ADDRESS_IDX_SHIFT + ADDRESS_OFFSET_SHIFT), HUGE_2M_MASK, table);
         return;
     }
 
@@ -291,12 +379,12 @@ static void dump_pmd(struct seq_file *m, u64 idx, void *table) {
     for (pte_l1_i = 0; pte_l1_i < MAX_PT_ENTRIES; ++pte_l1_i) {
         if (pte_tables->entry[pte_l1_i]) {
             seq_printf(m, "%s PTE idx %.3d persists in memory:\n", L4_LINE, pte_l1_i);
-            dump_pte(m, pte_l1_i | (idx << ADDRESS_IDX_SHIFT), PHYSICAL_PAGE_MASK, pte_tables->entry[pte_l1_i]);
+            dump_pte(m, mm_pt, pte_l1_i | (idx << ADDRESS_IDX_SHIFT), PHYSICAL_PAGE_MASK, pte_tables->entry[pte_l1_i]);
         }
     }
 }
 
-static void dump_pud(struct seq_file *m, u64 idx, void *table) {
+static void dump_pud(struct seq_file *m, struct mm_struct *mm_pt, u64 idx, void *table) {
     /* PUD(PDPTe)
      * Intel Vol. 3A 4-25
      *
@@ -392,7 +480,7 @@ static void dump_pud(struct seq_file *m, u64 idx, void *table) {
     if (entry & _PAGE_PSE) {
         seq_printf(m, "%s PTE is 1GB HugePage\n", L3_SPACE);
         // user space address shifted for 30 bit because of direct mapping to PTE
-        dump_pte(m, idx << (2 * ADDRESS_IDX_SHIFT + ADDRESS_OFFSET_SHIFT), HUGE_1G_MASK, table);
+        dump_pte(m, mm_pt, idx << (2 * ADDRESS_IDX_SHIFT + ADDRESS_OFFSET_SHIFT), HUGE_1G_MASK, table);
         return;
     }
 
@@ -407,13 +495,13 @@ static void dump_pud(struct seq_file *m, u64 idx, void *table) {
     for (pmd_l2_i = 0; pmd_l2_i < MAX_PT_ENTRIES; ++pmd_l2_i) {
         if (pmd_tables->entry[pmd_l2_i]) {
             seq_printf(m, "%s PMD idx %.3d persists in memory:\n", L3_LINE, pmd_l2_i);
-            dump_pmd(m, pmd_l2_i | (idx << ADDRESS_IDX_SHIFT), pmd_tables->entry[pmd_l2_i]);
+            dump_pmd(m, mm_pt, pmd_l2_i | (idx << ADDRESS_IDX_SHIFT), pmd_tables->entry[pmd_l2_i]);
         }
     }
    
 }
 
-static void dump_pgd(struct seq_file *m, u64 idx, void *table) {
+static void dump_pgd(struct seq_file *m, struct mm_struct *mm_pt, u64 idx, void *table) {
     /* PGD(PML4E) entries
      * Intel Vol. 3A 4-23
      * Bit Position(s) Contents
@@ -500,7 +588,7 @@ static void dump_pgd(struct seq_file *m, u64 idx, void *table) {
             seq_printf(m, "%s PUD idx %.3d persists in memory:\n", L2_LINE, pud_l3_i);
             // second parameter calculates possible user space address
             // shifting by 9 because of this is directory 
-            dump_pud(m, pud_l3_i | (idx << ADDRESS_IDX_SHIFT), pud_tables->entry[pud_l3_i]);
+            dump_pud(m, mm_pt, pud_l3_i | (idx << ADDRESS_IDX_SHIFT), pud_tables->entry[pud_l3_i]);
         }
     }
 }
@@ -552,7 +640,7 @@ static int dump_show(struct seq_file *m, void *p) {
     for (pgd_l4_i = 0; pgd_l4_i < MAX_PT_ENTRIES; ++pgd_l4_i) {
         if (pgd_l4->entry[pgd_l4_i]) {
             seq_printf(m, "%s PGD idx %.3d persists in memory:\n", L0_LINE, pgd_l4_i);
-            dump_pgd(m, pgd_l4_i, pgd_l4->entry[pgd_l4_i]);
+            dump_pgd(m, mm_pt, pgd_l4_i, pgd_l4->entry[pgd_l4_i]);
         }
     }
 exit:
