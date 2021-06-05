@@ -104,25 +104,25 @@ static struct file_operations pid_ops = {
 // not visible function
 static int is_stack(struct vm_area_struct *vma)
 {
-	/*
-	 * We make no effort to guess what a given thread considers to be
-	 * its "stack".  It's not even well-defined for programs written
-	 * languages like Go.
-	 */
-	return vma->vm_start <= vma->vm_mm->start_stack &&
-		vma->vm_end >= vma->vm_mm->start_stack;
+    /*
+     * We make no effort to guess what a given thread considers to be
+     * its "stack".  It's not even well-defined for programs written
+     * languages like Go.
+     */
+    return vma->vm_start <= vma->vm_mm->start_stack &&
+    	vma->vm_end >= vma->vm_mm->start_stack;
 }
 
 static void dump_vmarea(struct seq_file *m, struct mm_struct *mm_pt, u64 idx) {
     struct vm_area_struct *vma = find_vma(mm_pt, idx);
     
     struct mm_struct *mm = vma->vm_mm;
-	struct file *file = vma->vm_file;
-	unsigned long ino = 0;
-	unsigned long long pgoff = 0;
-	unsigned long start, end;
-	dev_t dev = 0;
-	const char *name = NULL;
+    struct file *file = vma->vm_file;
+    unsigned long ino = 0;
+    unsigned long long pgoff = 0;
+    unsigned long start, end;
+    dev_t dev = 0;
+    const char *name = NULL;
 
     if (vma == NULL) {
         return;
@@ -131,56 +131,56 @@ static void dump_vmarea(struct seq_file *m, struct mm_struct *mm_pt, u64 idx) {
 
     // code from fs/proc/task_mmu.c with custom formatting
     if (file) {
-		struct inode *inode = file_inode(vma->vm_file);
-		dev = inode->i_sb->s_dev;
-		ino = inode->i_ino;
-		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
-	}
+    	struct inode *inode = file_inode(vma->vm_file);
+    	dev = inode->i_sb->s_dev;
+    	ino = inode->i_ino;
+    	pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
+    }
 
-	start = vma->vm_start;
-	end = vma->vm_end;
+    start = vma->vm_start;
+    end = vma->vm_end;
 
-	/*
-	 * Print the dentry name for named mappings, and a
-	 * special [heap] marker for the heap:
-	 */
-	if (file) {
-		seq_pad(m, ' ');
-		seq_file_path(m, file, "\n");
-		goto done;
-	}
+    /*
+     * Print the dentry name for named mappings, and a
+     * special [heap] marker for the heap:
+     */
+    if (file) {
+    	seq_pad(m, ' ');
+    	seq_file_path(m, file, "\n");
+    	goto done;
+    }
 
-	if (vma->vm_ops && vma->vm_ops->name) {
-		name = vma->vm_ops->name(vma);
-		if (name)
-			goto done;
-	}
+    if (vma->vm_ops && vma->vm_ops->name) {
+    	name = vma->vm_ops->name(vma);
+    	if (name)
+    		goto done;
+    }
 
     if (vma->vm_flags & VM_MPX)
-		name = "[mpx]";
+    	name = "[mpx]";
 
-	if (!name) {
-		if (!mm) {
-			name = "[vdso]";
-			goto done;
-		}
+    if (!name) {
+    	if (!mm) {
+    		name = "[vdso]";
+    		goto done;
+    	}
 
-		if (vma->vm_start <= mm->brk &&
-		    vma->vm_end >= mm->start_brk) {
-			name = "[heap]";
-			goto done;
-		}
+    	if (vma->vm_start <= mm->brk &&
+    	    vma->vm_end >= mm->start_brk) {
+    		name = "[heap]";
+    		goto done;
+    	}
 
-		if (is_stack(vma))
-			name = "[stack]";
-	}
+    	if (is_stack(vma))
+    		name = "[stack]";
+    }
 
 done:
-	if (name) {
-		seq_pad(m, ' ');
-		seq_puts(m, name);
-	}
-	seq_putc(m, '\n');
+    if (name) {
+    	seq_pad(m, ' ');
+    	seq_puts(m, name);
+    }
+    seq_putc(m, '\n');
 }
 
 static void dump_pte(struct seq_file *m, struct mm_struct *mm_pt, u64 idx, u64 mask, void *table) {
