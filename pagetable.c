@@ -47,7 +47,12 @@ MODULE_VERSION("0.01");
 #define L4_SPACE       "|                       "
 #define L4_SPACE_INNER "|                           "
 
-
+#define STR_TRUE       "True"
+#define STR_FALSE      "False"
+#define STR_USER       "User"
+#define STR_KERNEL     "Kernel"
+#define STR_WRITE      "Write"
+#define STR_READ       "Read"
 
 static pid_t process_pid = 0;
 static DEFINE_MUTEX(pagetable_lock);
@@ -94,6 +99,34 @@ static struct file_operations pid_ops = {
 };
 
 static void dump_pte(struct seq_file *m, u64 idx, u64 mask, void *table) {
+    /* PTE entry
+     * Intel Vol. 3A 4-27
+     * Bit Position(s) Contents
+     * 0 (P)           Present; must be 1 to map a 4-KByte page
+     * 1 (R/W)         Read/write; if 0, writes may not be allowed to the 4-KByte page referenced by this entry (see Section 4.6)
+     * 2 (U/S)         User/supervisor; if 0, user-mode accesses are not allowed to the 4-KByte page referenced by this entry (see Section 4.6)
+     * 3 (PWT)         Page-level write-through; indirectly determines the memory type used to access the 4-KByte page referenced by this entry (see Section 4.9.2)
+     * 4 (PCD)         Page-level cache disable; indirectly determines the memory type used to access the 4-KByte page referenced by this entry (see Section 4.9.2)
+     * 5 (A)           Accessed; indicates whether software has accessed the 4-KByte page referenced by this entry (see Section 4.8)
+     * 6 (D)           Dirty; indicates whether software has written to the 4-KByte page referenced by this entry (see Section 4.8)
+     * 7 (PAT)         Indirectly determines the memory type used to access the 4-KByte page referenced by this entry (see Section 4.9.2)
+     * 8 (G)           Global; if CR4.PGE = 1, determines whether the translation is global (see Section 4.10); ignored otherwise
+     * 11:9            Ignored
+     * (M–1):12        Physical address of the 4-KByte page referenced by this entry
+     * 51:M            Reserved (must be 0)
+     * 58:52           Ignored
+     * 62:59           Protection key; if CR4.PKE = 1, determines the protection key of the page (see Section 4.6.2); ignored otherwise
+     * 63 (XD)         If IA32_EFER.NXE = 1, execute-disable (if 1, instruction fetches are not allowed from the 4-KByte page controlled by this entry; see Section 4.6); otherwise, reserved (must be 0)
+     *
+     * Physical address mask calculation for normal table:
+     *  >>> bin(((1 << (51 - 12 + 1)) - 1) << 12)
+     *  '0b1111111111111111111111111111111111111111000000000000'
+     *  >>> hex(((1 << (51 - 12 + 1)) - 1) << 12)
+     *  '0xffffffffff000'
+     *
+     * This is real address of Page Frame in physical memory
+     */
+
     u64 entry = (u64)table;
     u64 phys = 0;
     u64 virt = 0;
@@ -115,23 +148,23 @@ static void dump_pte(struct seq_file *m, u64 idx, u64 mask, void *table) {
             "%s PAGE GLOBAL:   %s\n",
                 L4_SPACE,
                 L4_SPACE_INNER,
-                entry & _PAGE_RW ? "Write" : "Read",
+                entry & _PAGE_RW ? STR_WRITE : STR_READ,
                 L4_SPACE_INNER,
-                entry & _PAGE_USER ? "User" : "Kernel",
+                entry & _PAGE_USER ? STR_USER : STR_KERNEL,
                 L4_SPACE_INNER,
-                entry & _PAGE_PWT ? "True" : "False",
+                entry & _PAGE_PWT ? STR_TRUE : STR_FALSE,
                 L4_SPACE_INNER,
-                entry & _PAGE_PCD ? "True" : "False",
+                entry & _PAGE_PCD ? STR_TRUE : STR_FALSE,
                 L4_SPACE_INNER,
-                entry & _PAGE_ACCESSED ? "True" : "False",
+                entry & _PAGE_ACCESSED ? STR_TRUE : STR_FALSE,
                 L4_SPACE_INNER,
-                entry & _PAGE_NX ? "True" : "False",
+                entry & _PAGE_NX ? STR_TRUE : STR_FALSE,
                 L4_SPACE_INNER,
-                entry & _PAGE_DIRTY ? "True" : "False",
+                entry & _PAGE_DIRTY ? STR_TRUE : STR_FALSE,
                 L4_SPACE_INNER,
-                entry & _PAGE_PAT ? "True" : "False",
+                entry & _PAGE_PAT ? STR_TRUE : STR_FALSE,
                 L4_SPACE_INNER,
-                entry & _PAGE_GLOBAL ? "True" : "False"
+                entry & _PAGE_GLOBAL ? STR_TRUE : STR_FALSE
             );
     phys = entry & mask;
     seq_printf(m, "%s Page physical address 0x%llx\n", L4_SPACE, phys);
@@ -142,12 +175,67 @@ static void dump_pte(struct seq_file *m, u64 idx, u64 mask, void *table) {
     }
     seq_printf(m, "%s Page kernel virtual address 0x%llx\n", L4_SPACE, virt);
     if (entry & _PAGE_USER) {
+        // Shift just for proper address display
         seq_printf(m, "%s Page user virtual address 0x%llx\n", L4_SPACE, idx << ADDRESS_OFFSET_SHIFT);
     }
 
 }
 
 static void dump_pmd(struct seq_file *m, u64 idx, void *table) {
+    /* PMD(PDe)
+     * Intel 4-26 Vol. 3A
+     *
+     * Table with pointer to normal(4096) PMD(PDe) entries:
+     * Bit Position(s) Contents
+     * 0 (P)           Present; must be 1 to reference a page table
+     * 1 (R/W)         Read/write; if 0, writes may not be allowed to the 2-MByte region controlled by this entry (see Section 4.6)
+     * 2 (U/S)         User/supervisor; if 0, user-mode accesses are not allowed to the 2-MByte region controlled by this entry (see Section 4.6)
+     * 3 (PWT)         Page-level write-through; indirectly determines the memory type used to access the page table referenced by this entry (see Section 4.9.2)
+     * 4 (PCD)         Page-level cache disable; indirectly determines the memory type used to access the page table referenced by this entry (see Section 4.9.2)
+     * 5 (A)           Accessed; indicates whether this entry has been used for linear-address translation (see Section 4.8)
+     * 6               Ignored
+     * 7 (PS)          Page size; must be 0 (otherwise, this entry maps a 2-MByte page; see Table 4-17)
+     * 11:8            Ignored
+     * (M–1):12        Physical address of 4-KByte aligned page table referenced by this entry
+     * 51:M            Reserved (must be 0)
+     * 62:52           Ignored
+     * 63 (XD)         If IA32_EFER.NXE = 1, execute-disable (if 1, instruction fetches are not allowed from the 2-MByte region controlled by this entry; see Section 4.6); otherwise, reserved (must be 0)
+     *
+     * Intel Vol. 3A 4-25
+     * Table with pointer to 2MB HugePage(PMD/PDe entries) PTE:
+     * Bit Position(s) Contents
+     * 0 (P)           Present; must be 1 to map a 2-MByte page
+     * 1 (R/W)         Read/write; if 0, writes may not be allowed to the 2-MByte page referenced by this entry (see Section 4.6)
+     * 2 (U/S)         User/supervisor; if 0, user-mode accesses are not allowed to the 2-MByte page referenced by this entry (see Section 4.6)
+     * 3 (PWT)         Page-level write-through; indirectly determines the memory type used to access the 2-MByte page referenced by this entry (see Section 4.9.2)
+     * 4 (PCD)         Page-level cache disable; indirectly determines the memory type used to access the 2-MByte page referenced by this entry (see Section 4.9.2)
+     * 5 (A)           Accessed; indicates whether software has accessed the 2-MByte page referenced by this entry (see Section 4.8)
+     * 6 (D)           Dirty; indicates whether software has written to the 2-MByte page referenced by this entry (see Section 4.8)
+     * 7 (PS)          Page size; must be 1 (otherwise, this entry references a page table; see Table 4-18)
+     * 8 (G)           Global; if CR4.PGE = 1, determines whether the translation is global (see Section 4.10); ignored otherwise
+     * 11:9            Ignored
+     * 12 (PAT)        Indirectly determines the memory type used to access the 2-MByte page referenced by this entry (see Section 4.9.2)
+     * 20:13           Reserved (must be 0)
+     * (M–1):21        Physical address of the 2-MByte page referenced by this entry
+     * 51:M            Reserved (must be 0)
+     * 58:52           Ignored
+     * 62:59           Protection key; if CR4.PKE = 1, determines the protection key of the page (see Section 4.6.2); ignored otherwise
+     * 63 (XD)         If IA32_EFER.NXE = 1, execute-disable (if 1, instruction fetches are not allowed from the 2-MByte page controlled by this entry; see Section 4.6); otherwise, reserved (must be 0)
+     *
+     * Physical address mask calculation for normal table:
+     *  >>> bin(((1 << (51 - 12 + 1)) - 1) << 12)
+     *  '0b1111111111111111111111111111111111111111000000000000'
+     *  >>> hex(((1 << (51 - 12 + 1)) - 1) << 12)
+     *  '0xffffffffff000'
+     *
+     * Physical address mask calculation for huge table:
+     *   >>> bin(((1 << (51 - 21 + 1)) - 1) << 21)
+     *   '0b1111111111111111111111111111111000000000000000000000'
+     *   >>> hex(((1 << (51 - 21 + 1)) - 1) << 21)
+     *   '0xfffffffe00000'
+     * 
+     *  For offset in 1GB Huge Page used 21 bits
+     */
     struct raw_table *pte_tables = NULL;
 
     u64 entry = (u64)table;
@@ -160,12 +248,6 @@ static void dump_pmd(struct seq_file *m, u64 idx, void *table) {
         return;
     }
 
-    if (entry & _PAGE_PSE) {
-        seq_printf(m, "%s PTE is 2MB HugePage\n", L3_SPACE);
-        dump_pte(m, idx << (ADDRESS_IDX_SHIFT + ADDRESS_OFFSET_SHIFT), HUGE_2M_MASK, table);
-        return;
-    }
-
     seq_printf(m, "%s PMD attrs:\n"
             "%s PAGE RW:       %s\n"
             "%s PAGE USER:     %s\n"
@@ -173,23 +255,30 @@ static void dump_pmd(struct seq_file *m, u64 idx, void *table) {
             "%s PAGE PCD:      %s\n"
             "%s PAGE ACCESSED: %s\n"
             "%s PAGE NX:       %s\n"
-            "%sPAGE PSE:      %s\n",
+            "%s PAGE PSE:      %s\n",
                 L3_SPACE,
                 L3_SPACE_INNER,
-                entry & _PAGE_RW ? "Write" : "Read",
+                entry & _PAGE_RW ? STR_WRITE : STR_READ,
                 L3_SPACE_INNER,
-                entry & _PAGE_USER ? "User" : "Kernel",
+                entry & _PAGE_USER ? STR_USER : STR_KERNEL,
                 L3_SPACE_INNER,
-                entry & _PAGE_PWT ? "True" : "False",
+                entry & _PAGE_PWT ? STR_TRUE : STR_FALSE,
                 L3_SPACE_INNER,
-                entry & _PAGE_PCD ? "True" : "False",
+                entry & _PAGE_PCD ? STR_TRUE : STR_FALSE,
                 L3_SPACE_INNER,
-                entry & _PAGE_ACCESSED ? "True" : "False",
+                entry & _PAGE_ACCESSED ? STR_TRUE : STR_FALSE,
                 L3_SPACE_INNER,
-                entry & _PAGE_NX ? "True" : "False",
+                entry & _PAGE_NX ? STR_TRUE : STR_FALSE,
                 L3_SPACE_INNER,
-                entry & _PAGE_PSE ? "True" : "False" // HugePages 2M
+                entry & _PAGE_PSE ? STR_TRUE : STR_FALSE // HugePages 2M
             );
+
+    if (entry & _PAGE_PSE) {
+        // user space address shifted for 21 bit because of direct mapping to PTE
+        seq_printf(m, "%s PTE is 2MB HugePage\n", L3_SPACE);
+        dump_pte(m, idx << (ADDRESS_IDX_SHIFT + ADDRESS_OFFSET_SHIFT), HUGE_2M_MASK, table);
+        return;
+    }
 
     pte_phys = entry & PHYSICAL_PAGE_MASK;
     seq_printf(m, "%s PTE entry physical address 0x%llx\n", L3_SPACE, pte_phys);
@@ -208,6 +297,60 @@ static void dump_pmd(struct seq_file *m, u64 idx, void *table) {
 }
 
 static void dump_pud(struct seq_file *m, u64 idx, void *table) {
+    /* PUD(PDPTe)
+     * Intel Vol. 3A 4-25
+     *
+     * Table with pointer to normal(4096) PMD(PDe) entries:
+     * Bit Position(s) Contents
+     * 0 (P)           Present; must be 1 to reference a page directory
+     * 1 (R/W)         Read/write; if 0, writes may not be allowed to the 1-GByte region controlled by this entry (see Section 4.6)
+     * 2 (U/S)         User/supervisor; if 0, user-mode accesses are not allowed to the 1-GByte region controlled by this entry (see Section 4.6)
+     * 3 (PWT)         Page-level write-through; indirectly determines the memory type used to access the page directory referenced by this entry (see Section 4.9.2)
+     * 4 (PCD)         Page-level cache disable; indirectly determines the memory type used to access the page directory referenced by this entry (see Section 4.9.2)
+     * 5 (A)           Accessed; indicates whether this entry has been used for linear-address translation (see Section 4.8)
+     * 6               Ignored
+     * 7 (PS)          Page size; must be 0 (otherwise, this entry maps a 1-GByte page; see Table 4-15)
+     * 11:8            Ignored
+     * (M–1):12        Physical address of 4-KByte aligned page directory referenced by this entry
+     * 51:M            Reserved (must be 0)
+     * 62:52           Ignored
+     * 63 (XD)         If IA32_EFER.NXE = 1, execute-disable (if 1, instruction fetches are not allowed from the 1-GByte region controlled by this entry; see Section 4.6); otherwise, reserved (must be 0)
+     *
+     * Intel 4-24 Vol. 3A
+     * Table with pointer to 1GB HugePage(no PUD/PDPTe, PMD/PDe entries) PTE:
+     * Bit Position(s) Contents
+     * 0 (P)           Present; must be 1 to map a 1-GByte page
+     * 1 (R/W)         Read/write; if 0, writes may not be allowed to the 1-GByte page referenced by this entry (see Section 4.6)
+     * 2 (U/S)         User/supervisor; if 0, user-mode accesses are not allowed to the 1-GByte page referenced by this entry (see Section 4.6)
+     * 3 (PWT)         Page-level write-through; indirectly determines the memory type used to access the 1-GByte page referenced by this entry (see Section 4.9.2)
+     * 4 (PCD)         Page-level cache disable; indirectly determines the memory type used to access the 1-GByte page referenced by this entry (see Section 4.9.2)
+     * 5 (A)           Accessed; indicates whether software has accessed the 1-GByte page referenced by this entry (see Section 4.8)
+     * 6 (D)           Dirty; indicates whether software has written to the 1-GByte page referenced by this entry (see Section 4.8)
+     * 7 (PS)          Page size; must be 1 (otherwise, this entry references a page directory; see Table 4-16)
+     * 8 (G)           Global; if CR4.PGE = 1, determines whether the translation is global (see Section 4.10); ignored otherwise
+     * 11:9            Ignored
+     * 12 (PAT)        Indirectly determines the memory type used to access the 1-GByte page referenced by this entry (see Section 4.9.2)1
+     * 29:13           Reserved (must be 0)
+     * (M–1):30        Physical address of the 1-GByte page referenced by this entry
+     * 51:M            Reserved (must be 0)
+     * 58:52           Ignored
+     * 62:59           Protection key; if CR4.PKE = 1, determines the protection key of the page (see Section 4.6.2); ignored otherwise
+     * 63 (XD)         If IA32_EFER.NXE = 1, execute-disable (if 1, instruction fetches are not allowed from the 1-GByte page controlled by this entry; see Section 4.6); otherwise, reserved (must be 0)
+     *
+     * Physical address mask calculation for normal table:
+     *  >>> bin(((1 << (51 - 12 + 1)) - 1) << 12)
+     *  '0b1111111111111111111111111111111111111111000000000000'
+     *  >>> hex(((1 << (51 - 12 + 1)) - 1) << 12)
+     *  '0xffffffffff000'
+     *
+     * Physical address mask calculation for huge table:
+     *  >>> bin(((1 << (51 - 30 + 1)) - 1) << 30)
+     *  '0b1111111111111111111111000000000000000000000000000000'
+     *  >>> hex(((1 << (51 - 30 + 1)) - 1) << 30)
+     *  '0xfffffc0000000'
+     * 
+     *  For offset in 1GB Huge Page used 30 bits
+     */
     struct raw_table *pmd_tables = NULL;
 
     u64 entry = (u64)table;
@@ -217,13 +360,6 @@ static void dump_pud(struct seq_file *m, u64 idx, void *table) {
 
     if(!(entry & _PAGE_PRESENT)) {
         seq_printf(m, "%s PUD is not present\n", L2_SPACE);
-        return;
-    }
-
-    if (entry & _PAGE_PSE) {
-        // not tested
-        seq_printf(m, "%s PTE is 1GB HugePage\n", L3_SPACE);
-        dump_pte(m, idx << (2 * ADDRESS_IDX_SHIFT + ADDRESS_OFFSET_SHIFT), HUGE_1G_MASK, table);
         return;
     }
 
@@ -237,20 +373,28 @@ static void dump_pud(struct seq_file *m, u64 idx, void *table) {
             "%s PAGE PSE:      %s\n",
                 L2_SPACE,
                 L2_SPACE_INNER,
-                entry & _PAGE_RW ? "Write" : "Read",
+                entry & _PAGE_RW ? STR_WRITE : STR_READ,
                 L2_SPACE_INNER,
-                entry & _PAGE_USER ? "User" : "Kernel",
+                entry & _PAGE_USER ? STR_USER : STR_KERNEL,
                 L2_SPACE_INNER,
-                entry & _PAGE_PWT ? "True" : "False",
+                entry & _PAGE_PWT ? STR_TRUE : STR_FALSE,
                 L2_SPACE_INNER,
-                entry & _PAGE_PCD ? "True" : "False",
+                entry & _PAGE_PCD ? STR_TRUE : STR_FALSE,
                 L2_SPACE_INNER,
-                entry & _PAGE_ACCESSED ? "True" : "False",
+                entry & _PAGE_ACCESSED ? STR_TRUE : STR_FALSE,
                 L2_SPACE_INNER,
-                entry & _PAGE_NX ? "True" : "False",
+                entry & _PAGE_NX ? STR_TRUE : STR_FALSE,
                 L2_SPACE_INNER,
-                entry & _PAGE_PSE ? "True" : "False" // HugePages 1G
+                entry & _PAGE_PSE ? STR_TRUE : STR_FALSE // HugePages 1G
             );
+
+    // not tested
+    if (entry & _PAGE_PSE) {
+        seq_printf(m, "%s PTE is 1GB HugePage\n", L3_SPACE);
+        // user space address shifted for 30 bit because of direct mapping to PTE
+        dump_pte(m, idx << (2 * ADDRESS_IDX_SHIFT + ADDRESS_OFFSET_SHIFT), HUGE_1G_MASK, table);
+        return;
+    }
 
     pmd_phys = entry & PHYSICAL_PAGE_MASK;
     seq_printf(m, "%s PMD entry physical address 0x%llx\n", L2_SPACE, pmd_phys);
@@ -270,6 +414,41 @@ static void dump_pud(struct seq_file *m, u64 idx, void *table) {
 }
 
 static void dump_pgd(struct seq_file *m, u64 idx, void *table) {
+    /* PGD(PML4E) entries
+     * Intel Vol. 3A 4-23
+     * Bit Position(s) Contents
+     * 0 (P)           Present; must be 1 to reference a page-directory-pointer table
+     * 1 (R/W)         Read/write; if 0, writes may not be allowed to the 512-GByte region controlled by this entry (see Section 4.6)
+     * 2 (U/S)         User/supervisor; if 0, user-mode accesses are not allowed to the 512-GByte region controlled by this entry (see Section 4.6)
+     * 3 (PWT)         Page-level write-through; indirectly determines the memory type used to access the page-directory-pointer table referenced by this entry (see Section 4.9.2)
+     * 4 (PCD)         Page-level cache disable; indirectly determines the memory type used to access the page-directory-pointer table referenced by this entry (see Section 4.9.2)
+     * 5 (A)           Accessed; indicates whether this entry has been used for linear-address translation (see Section 4.8)
+     * 6               Ignored
+     * 7 (PS)          Reserved (must be 0)
+     * 11:8            Ignored
+     * M–1:12          Physical address of 4-KByte aligned page-directory-pointer table referenced by this entry
+     * 51:M            Reserved (must be 0)
+     * 62:52           Ignored
+     * 63 (XD)         If IA32_EFER.NXE = 1, execute-disable (if 1, instruction fetches are not allowed from the 512-GByte region controlled by this entry; see Section 4.6); otherwise, reserved (must be 0)
+     * 
+     * Physical address mask calculation:
+     *  >>> bin(((1 << (51 - 12 + 1)) - 1) << 12)
+     *  '0b1111111111111111111111111111111111111111000000000000'
+     *  >>> hex(((1 << (51 - 12 + 1)) - 1) << 12)
+     *  '0xffffffffff000'
+     *
+     * User space address:
+     * R R R R R R R R R R R R R R R R | G G G G G G G G G | U U U U U U U U U | M M M M M M M M M | E E E E E E E E E | O O O O O O O O O O O O
+     * 
+     * Bit position(s) Contents
+     * R               Reserved. Only 48 bits used for addressing 256GB of RAM
+     * G               Page Global Directory index
+     * U               Page Upper Directory index
+     * M               Page Middle Directory index
+     * E               Page Table Entry index
+     * O               Offset inside physical page
+     *
+     */
     struct raw_table *pud_tables = NULL;
 
     u64 entry = (u64)table; // 4096 / 512 == 8 bytes or 64 bits per entry
@@ -292,22 +471,24 @@ static void dump_pgd(struct seq_file *m, u64 idx, void *table) {
             "%s PAGE PSE:      %s\n",
                 L1_SPACE,
                 L1_SPACE_INNER,
-                entry & _PAGE_RW ? "Write" : "Read",
+                entry & _PAGE_RW ? STR_WRITE : STR_READ,
                 L1_SPACE_INNER,
-                entry & _PAGE_USER ? "User" : "Kernel",
+                entry & _PAGE_USER ? STR_USER : STR_KERNEL,
                 L1_SPACE_INNER,
-                entry & _PAGE_PWT ? "True" : "False",
+                entry & _PAGE_PWT ? STR_TRUE : STR_FALSE,
                 L1_SPACE_INNER,
-                entry & _PAGE_PCD ? "True" : "False",
+                entry & _PAGE_PCD ? STR_TRUE : STR_FALSE,
                 L1_SPACE_INNER,
-                entry & _PAGE_ACCESSED ? "True" : "False",
+                entry & _PAGE_ACCESSED ? STR_TRUE : STR_FALSE,
                 L1_SPACE_INNER,
-                entry & _PAGE_NX ? "True" : "False",
+                entry & _PAGE_NX ? STR_TRUE : STR_FALSE,
                 L1_SPACE_INNER,
-                entry & _PAGE_PSE ? "True" : "False" // not possible for PGD
+                entry & _PAGE_PSE ? STR_TRUE : STR_FALSE // not possible for PGD
             );
+
     pud_phys = entry & PHYSICAL_PAGE_MASK;
     seq_printf(m, "%s PUD entry physical address 0x%llx\n", L1_SPACE, pud_phys);
+    // phys_to_virt works only with kmalloc and lowmem
     pud_tables = phys_to_virt(pud_phys);
     if(!virt_addr_valid(pud_tables) || !IS_ALIGNED(pud_phys, PAGE_SIZE)){
         seq_printf(m, "%s PUD entry has incorrect virtual address\n", L1_SPACE);
@@ -317,6 +498,8 @@ static void dump_pgd(struct seq_file *m, u64 idx, void *table) {
     for (pud_l3_i = 0; pud_l3_i < MAX_PT_ENTRIES; ++pud_l3_i) {
         if (pud_tables->entry[pud_l3_i]) {
             seq_printf(m, "%s PUD idx %.3d persists in memory:\n", L2_LINE, pud_l3_i);
+            // second parameter calculates possible user space address
+            // shifting by 9 because of this is directory 
             dump_pud(m, pud_l3_i | (idx << ADDRESS_IDX_SHIFT), pud_tables->entry[pud_l3_i]);
         }
     }
@@ -372,9 +555,6 @@ static int dump_show(struct seq_file *m, void *p) {
             dump_pgd(m, pgd_l4_i, pgd_l4->entry[pgd_l4_i]);
         }
     }
-
-
-
 exit:
     return 0;
 }
