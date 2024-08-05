@@ -1,16 +1,15 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/fs.h>
-#include <linux/string.h>
-#include <linux/uaccess.h>
 #include <linux/debugfs.h>
 #include <linux/sched/mm.h>
 #include <linux/mm.h>
+#include <asm/io.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Alexander Gryanko");
 MODULE_DESCRIPTION("Shows pagetable for the process");
-MODULE_VERSION("0.01");
+MODULE_VERSION("0.02");
 
 /*
  * Mapping of Intel - Linux levels
@@ -155,9 +154,6 @@ static void dump_vmarea(struct seq_file *m, struct mm_struct *mm_pt, u64 idx) {
     	if (name)
     		goto done;
     }
-
-    if (vma->vm_flags & VM_MPX)
-    	name = "[mpx]";
 
     if (!name) {
     	if (!mm) {

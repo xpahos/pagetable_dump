@@ -1,0 +1,13 @@
+.Module.symvers.cmd
+.modules.order.cmd
+.pagetable.ko.cmd
+.pagetable.mod.cmd
+.pagetable.mod.o.cmd
+.pagetable.o.cmd
+Module.symvers
+modules.order
+pagetable.ko
+pagetable.mod
+pagetable.mod.c
+pagetable.mod.o
+pagetable.o
